@@ -8,6 +8,7 @@ library(DataExplorer)
 train <- vroom("/Users/nicholasthomas/Desktop/STATISTICS/STAT 348/Walmart/walmart-recruiting-store-sales-forecasting/train.csv")
 test <- vroom("/Users/nicholasthomas/Desktop/STATISTICS/STAT 348/Walmart/walmart-recruiting-store-sales-forecasting/test.csv")
 features <- vroom("/Users/nicholasthomas/Desktop/STATISTICS/STAT 348/Walmart/walmart-recruiting-store-sales-forecasting/features.csv")
+stores <- vroom("/Users/nicholasthomas/Desktop/STATISTICS/STAT 348/Walmart/walmart-recruiting-store-sales-forecasting/stores.csv")
 
 #########
 ## EDA ##
