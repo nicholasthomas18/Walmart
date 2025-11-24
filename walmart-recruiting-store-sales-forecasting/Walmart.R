@@ -3,13 +3,11 @@ library(tidyverse)
 library(vroom)
 library(tidymodels)
 library(DataExplorer)
-library(lubridate)
 
 ## Read in the Data
 train <- vroom("/Users/nicholasthomas/Desktop/STATISTICS/STAT 348/Walmart/walmart-recruiting-store-sales-forecasting/train.csv")
 test <- vroom("/Users/nicholasthomas/Desktop/STATISTICS/STAT 348/Walmart/walmart-recruiting-store-sales-forecasting/test.csv")
 features <- vroom("/Users/nicholasthomas/Desktop/STATISTICS/STAT 348/Walmart/walmart-recruiting-store-sales-forecasting/features.csv")
-stores <- vroom("/Users/nicholasthomas/Desktop/STATISTICS/STAT 348/Walmart/walmart-recruiting-store-sales-forecasting/stores.csv")
 
 #########
 ## EDA ##
@@ -46,7 +44,6 @@ feature_recipe <- recipe(~., data=features) %>%
                 seq.Date(as.Date("2013-09-06"), by = "day", length.out = 7)
               ))),
               
-              
               Thanksgiving_Flag = as.integer(Date %in% as.Date(c(
                 seq.Date(as.Date("2010-11-26"), by = "day", length.out = 7),
                 seq.Date(as.Date("2011-11-25"), by = "day", length.out = 7),
@@ -59,125 +56,112 @@ feature_recipe <- recipe(~., data=features) %>%
                 seq.Date(as.Date("2011-12-23"), by="day", length.out=7),
                 seq.Date(as.Date("2012-12-21"), by="day", length.out=7),
                 seq.Date(as.Date("2013-12-20"), by="day", length.out=7)
-              ))),
-              BlackFriday_Flag = as.integer(Date %in% as.Date(c(
-                seq.Date(as.Date("2010-11-26"), by="day", length.out=7),
-                seq.Date(as.Date("2011-11-25"), by="day", length.out=7),
-                seq.Date(as.Date("2012-11-23"), by="day", length.out=7),
-                seq.Date(as.Date("2013-11-29"), by="day", length.out=7)
-              ))),
-              FourthJuly_Flag = as.integer(Date %in% as.Date(c(
-                seq.Date(as.Date("2010-07-02"), by="day", length.out=7),
-                seq.Date(as.Date("2011-07-01"), by="day", length.out=7),
-                seq.Date(as.Date("2012-06-29"), by="day", length.out=7),
-                seq.Date(as.Date("2013-07-05"), by="day", length.out=7)
-              ))),
-              MemorialDay_Flag = as.integer(Date %in% as.Date(c(
-                seq.Date(as.Date("2010-05-28"), by="day", length.out=7),
-                seq.Date(as.Date("2011-05-27"), by="day", length.out=7),
-                seq.Date(as.Date("2012-05-25"), by="day", length.out=7),
-                seq.Date(as.Date("2013-05-24"), by="day", length.out=7)
               )))
               
-              ) %>%
+  ) %>%
   step_impute_bag(CPI, Unemployment,
                   impute_with = imp_vars(DecDate, Store))
+
 imputed_features <- juice(prep(feature_recipe))
 
 
+########################
+## Merge the Datasets ##
+########################
 
-train_full <- train %>%
-  left_join(imputed_features %>% select(-IsHoliday), by = c("Store", "Date")) %>%
-  left_join(stores, by = "Store")
-train_full <- train_full %>% drop_na(Weekly_Sales)
-
-
-sample_store_depts <- train_full %>%
-  distinct(Store, Dept) %>%
-  slice_sample(n = 20)   # change 20 to whatever sample size you want
-
-train_sample <- train_full %>%
-  semi_join(sample_store_depts, by = c("Store", "Dept"))
-
-
-
-sales_rec <- recipe(Weekly_Sales ~ ., data = train_sample) %>%
-  step_rm(Date) %>%
-  step_mutate(
-    Store = factor(Store),
-    Dept  = factor(Dept),
-    Type  = factor(Type)
-  ) %>%
-  step_dummy(all_nominal_predictors()) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_numeric_predictors(), -all_outcomes())
-
-sales_prep <- prep(sales_rec)
-
-train_baked <- bake(sales_prep, new_data = NULL)
-
-n_pred <- train_baked %>%
-  select(-Weekly_Sales) %>%
-  ncol()
+fullTrain <- left_join(train, imputed_features, by=c("Store", "Date")) %>%
+  select(-IsHoliday.y) %>%
+  rename(IsHoliday=IsHoliday.x) %>%
+  select(-MarkDown_Total)
+fullTest <- left_join(test, imputed_features, by=c("Store", "Date")) %>%
+  select(-IsHoliday.y) %>%
+  rename(IsHoliday=IsHoliday.x) %>%
+  select(-MarkDown_Total)
+plot_missing(fullTrain)
+plot_missing(fullTest)
 
 
-folds <- vfold_cv(train_sample, v = 5)
+##################################
+## Loop Through the Store-depts ## 
+## and generate predictions.    ##
+##################################
+all_preds <- tibble(Id = character(), Weekly_Sales = numeric())
+n_storeDepts <- fullTest %>% distinct(Store, Dept) %>% nrow()
+cntr <- 0
+for(store in unique(fullTest$Store)){
+  
+  store_train <- fullTrain %>%
+    filter(Store==store)
+  store_test <- fullTest %>%
+    filter(Store==store)
+  
+  for(dept in unique(store_test$Dept)){
+    
+    ## Filter Test and Training Data
+    dept_train <- store_train %>%
+      filter(Dept==dept)
+    dept_test <- store_test %>%
+      filter(Dept==dept)
+    
+    ## If Statements for data scenarios
+    if(nrow(dept_train)==0){
+      
+      ## Predict 0
+      preds <- dept_test %>%
+        transmute(Id=paste(Store, Dept, Date, sep="_"),
+                  Weekly_Sales=0)
+      
+    } else if(nrow(dept_train) < 10 && nrow(dept_train) > 0){
+      
+      ## Predict the mean
+      preds <- dept_test %>%
+        transmute(Id=paste(Store, Dept, Date, sep="_"),
+                  Weekly_Sales=mean(dept_train$Weekly_Sales))
+      
+    } else {
+      
+      ## Fit a penalized regression model
+      my_recipe <- recipe(Weekly_Sales ~ ., data = dept_train) %>%
+        step_mutate(Holiday = as.integer(IsHoliday)) %>%
+        step_date(Date, features=c("month","year")) %>%
+        step_rm(Date, Store, Dept, IsHoliday)
+      prepped_recipe <- prep(my_recipe)
+      tst <- bake(prepped_recipe, new_data=dept_test)
+      
+      my_model <- rand_forest(mtry=3,
+                              trees=100,
+                              min_n=5) %>%
+        set_engine("ranger") %>%
+        set_mode("regression")
+      
+      my_wf <- workflow() %>%
+        add_recipe(my_recipe) %>%
+        add_model(my_model) %>%
+        fit(dept_train)
+      
+      preds <- dept_test %>%
+        transmute(Id=paste(Store, Dept, Date, sep="_"),
+                  Weekly_Sales=predict(my_wf, new_data = .) %>%
+                    pull(.pred))
+      
+    }
+    
+    ## Bind predictions together
+    all_preds <- bind_rows(all_preds,
+                           preds)
+    
+    ## Print out Progress
+    cntr <- cntr+1
+    cat("Store", store, "Department", dept, "Completed.",
+        round(100 * cntr / n_storeDepts, 1), "% overall complete.\n")
+    
+  } ## End Dept Loop
+  
+} ## End Store Loop
+
+## Write out after each store so I don't have to start over
+vroom_write(x=all_preds, 
+            file=paste0("./Predictions.csv"), delim=",")
 
 
-# Linear Model
-lm_spec <- linear_reg() %>%
-  set_engine("lm")
 
-lm_wf <- workflow() %>%
-  add_model(lm_spec) %>%
-  add_recipe(sales_rec)
-
-time_lm <- system.time({
-  lm_res <- fit_resamples(
-    lm_wf,
-    resamples = folds,
-    metrics   = metric_set(rmse, rsq),
-    control   = control_resamples(save_pred = TRUE)
-  )
-})
-
-lm_metrics <- lm_res %>% collect_metrics()
-lm_metrics
-
-# Random Forest
-rf_spec <- rand_forest(
-  mtry  = tune(),
-  min_n = tune(),
-  trees = 500
-) %>%
-  set_engine("ranger") %>%
-  set_mode("regression")
-
-rf_wf <- workflow() %>%
-  add_model(rf_spec) %>%
-  add_recipe(sales_rec)
-
-rf_params <- parameters(
-  mtry(range = c(1L, n_pred)),
-  min_n(range = c(2L, 50L))   # adjust upper bound if you want
-)
-
-rf_grid <- grid_space_filling(rf_params, size = 20)
-
-time_rf <- system.time({
-  rf_res <- tune_grid(
-    rf_wf,
-    resamples = folds,
-    grid      = rf_grid,
-    metrics   = metric_set(rmse, rsq),
-    control   = control_grid(save_pred = TRUE)
-  )
-})
-
-rf_best <- rf_res %>% tune::select_best(metric = "rmse")
-
-rf_metrics <- rf_res %>%
-  collect_metrics() %>%
-  filter(.config == rf_best$.config)
-
-rf_metrics
